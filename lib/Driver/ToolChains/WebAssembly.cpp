@@ -68,6 +68,9 @@ void wasm::Linker::ConstructJob(Compilation &C, const JobAction &JA,
     AddRunTimeLibs(ToolChain, ToolChain.getDriver(), CmdArgs, Args);
   }
 
+  if (Args.hasArg(options::OPT_shared))
+    CmdArgs.push_back("-shared");
+
   CmdArgs.push_back("-o");
   CmdArgs.push_back(Output.getFilename());
 

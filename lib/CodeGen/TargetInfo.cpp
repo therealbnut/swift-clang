@@ -721,13 +721,13 @@ ABIArgInfo DefaultABIInfo::classifyReturnType(QualType RetTy) const {
 //===----------------------------------------------------------------------===//
 // WebAssembly ABI Implementation
 //
-// This is a very simple ABI that relies a lot on DefaultABIInfo.
+// This is a very simple ABI that relies a lot on SwiftABIInfo.
 //===----------------------------------------------------------------------===//
 
-class WebAssemblyABIInfo final : public DefaultABIInfo {
+class WebAssemblyABIInfo final : public SwiftABIInfo {
 public:
   explicit WebAssemblyABIInfo(CodeGen::CodeGenTypes &CGT)
-      : DefaultABIInfo(CGT) {}
+      : SwiftABIInfo(CGT) {}
 
 private:
   ABIArgInfo classifyReturnType(QualType RetTy) const;
@@ -745,6 +745,18 @@ private:
 
   Address EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
                     QualType Ty) const override;
+
+  bool shouldPassIndirectlyForSwift(ArrayRef<llvm::Type*> scalars,
+                                            bool asReturnValue) const override {
+    // experimental
+    return occupiesMoreThan(CGT, scalars, /*total*/ 4);
+  }
+
+  bool isSwiftErrorInRegister() const override {
+    // experimental
+    return true;
+  }
+
 };
 
 class WebAssemblyTargetCodeGenInfo final : public TargetCodeGenInfo {
@@ -773,7 +785,22 @@ ABIArgInfo WebAssemblyABIInfo::classifyArgumentType(QualType Ty) const {
   }
 
   // Otherwise just do the default thing.
-  return DefaultABIInfo::classifyArgumentType(Ty);
+  // copy from DefaultABIInfo
+  if (isAggregateTypeForABI(Ty)) {
+    // Records with non-trivial destructors/copy-constructors should not be
+    // passed by value.
+    if (CGCXXABI::RecordArgABI RAA = getRecordArgABI(Ty, getCXXABI()))
+      return getNaturalAlignIndirect(Ty, RAA == CGCXXABI::RAA_DirectInMemory);
+
+    return getNaturalAlignIndirect(Ty);
+  }
+
+  // Treat an enum type as its underlying type.
+  if (const EnumType *EnumTy = Ty->getAs<EnumType>())
+    Ty = EnumTy->getDecl()->getIntegerType();
+
+  return (Ty->isPromotableIntegerType() ?
+          ABIArgInfo::getExtend(Ty) : ABIArgInfo::getDirect());
 }
 
 ABIArgInfo WebAssemblyABIInfo::classifyReturnType(QualType RetTy) const {
@@ -793,7 +820,18 @@ ABIArgInfo WebAssemblyABIInfo::classifyReturnType(QualType RetTy) const {
   }
 
   // Otherwise just do the default thing.
-  return DefaultABIInfo::classifyReturnType(RetTy);
+  if (RetTy->isVoidType())
+    return ABIArgInfo::getIgnore();
+
+  if (isAggregateTypeForABI(RetTy))
+    return getNaturalAlignIndirect(RetTy);
+
+  // Treat an enum type as its underlying type.
+  if (const EnumType *EnumTy = RetTy->getAs<EnumType>())
+    RetTy = EnumTy->getDecl()->getIntegerType();
+
+  return (RetTy->isPromotableIntegerType() ?
+          ABIArgInfo::getExtend(RetTy) : ABIArgInfo::getDirect());
 }
 
 Address WebAssemblyABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
@@ -1009,7 +1047,7 @@ class X86_32ABIInfo : public SwiftABIInfo {
   ABIArgInfo classifyReturnType(QualType RetTy, CCState &State) const;
   ABIArgInfo classifyArgumentType(QualType RetTy, CCState &State) const;
 
-  /// \brief Updates the number of available free registers, returns 
+  /// \brief Updates the number of available free registers, returns
   /// true if any registers were allocated.
   bool updateFreeRegs(QualType Ty, CCState &State) const;
 
@@ -1039,7 +1077,7 @@ public:
                 bool RetSmallStructInRegABI, bool Win32StructABI,
                 unsigned NumRegisterParameters, bool SoftFloatABI)
     : SwiftABIInfo(CGT), IsDarwinVectorABI(DarwinVectorABI),
-      IsRetSmallStructInRegABI(RetSmallStructInRegABI), 
+      IsRetSmallStructInRegABI(RetSmallStructInRegABI),
       IsWin32StructABI(Win32StructABI),
       IsSoftFloatABI(SoftFloatABI),
       IsMCUABI(CGT.getTarget().getTriple().isOSIAMCU()),
@@ -1052,7 +1090,7 @@ public:
     // four vector registers for vectors, but those can overlap with the
     // scalar registers.
     return occupiesMoreThan(CGT, scalars, /*total*/ 3);
-  }  
+  }
 
   bool isSwiftErrorInRegister() const override {
     // x86-32 lowering does not support passing swifterror in a register.
@@ -1542,7 +1580,7 @@ bool X86_32ABIInfo::updateFreeRegs(QualType Ty, CCState &State) const {
   return true;
 }
 
-bool X86_32ABIInfo::shouldAggregateUseDirect(QualType Ty, CCState &State, 
+bool X86_32ABIInfo::shouldAggregateUseDirect(QualType Ty, CCState &State,
                                              bool &InReg,
                                              bool &NeedsPadding) const {
   // On Windows, aggregates other than HFAs are never passed in registers, and
@@ -1585,7 +1623,7 @@ bool X86_32ABIInfo::shouldPrimitiveUseInReg(QualType Ty, CCState &State) const {
     if (getContext().getTypeSize(Ty) > 32)
       return false;
 
-    return (Ty->isIntegralOrEnumerationType() || Ty->isPointerType() || 
+    return (Ty->isIntegralOrEnumerationType() || Ty->isPointerType() ||
         Ty->isReferenceType());
   }
 
@@ -2187,7 +2225,7 @@ public:
   bool shouldPassIndirectlyForSwift(ArrayRef<llvm::Type*> scalars,
                                     bool asReturnValue) const override {
     return occupiesMoreThan(CGT, scalars, /*total*/ 4);
-  }  
+  }
   bool isSwiftErrorInRegister() const override {
     return true;
   }
@@ -3803,7 +3841,7 @@ Address X86_64ABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
       CGF.Builder.CreateMemCpy(Tmp, RegAddr, TySize, false);
       RegAddr = Tmp;
     }
-    
+
   } else if (neededSSE == 1) {
     RegAddr = Address(CGF.Builder.CreateGEP(RegSaveArea, fp_offset),
                       CharUnits::fromQuantity(16));
@@ -4197,7 +4235,7 @@ Address PPC32_SVR4_ABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAList,
     }
 
     // Get the address of the saved value by scaling the number of
-    // registers we've used by the number of 
+    // registers we've used by the number of
     CharUnits RegSize = CharUnits::fromQuantity((isInt || IsSoftFloatABI) ? 4 : 8);
     llvm::Value *RegOffset =
       Builder.CreateMul(NumRegs, Builder.getInt8(RegSize.getQuantity()));
@@ -4208,7 +4246,7 @@ Address PPC32_SVR4_ABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAList,
 
     // Increase the used-register count.
     NumRegs =
-      Builder.CreateAdd(NumRegs, 
+      Builder.CreateAdd(NumRegs,
                         Builder.getInt8((isI64 || (isF64 && IsSoftFloatABI)) ? 2 : 1));
     Builder.CreateStore(NumRegs, NumRegsAddr);
 
@@ -4244,7 +4282,7 @@ Address PPC32_SVR4_ABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAList,
       OverflowArea = Address(emitRoundPointerUpToAlignment(CGF, Ptr, Align),
                                                            Align);
     }
- 
+
     MemAddr = Builder.CreateElementBitCast(OverflowArea, DirectTy);
 
     // Increase the overflow area.

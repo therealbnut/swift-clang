@@ -73,6 +73,16 @@ private:
 
   bool setCPU(const std::string &Name) final { return isValidCPUName(Name); }
 
+  CallingConvCheckResult checkCallingConvention(CallingConv CC) const override {
+    switch(CC) {
+    case CC_C:
+    case CC_Swift:
+      return CCCR_OK;
+    default:
+      return CCCR_Warning;
+    }
+  }
+
   ArrayRef<Builtin::Info> getTargetBuiltins() const final;
 
   BuiltinVaListKind getBuiltinVaListKind() const final {
